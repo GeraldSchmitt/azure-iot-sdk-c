@@ -19,32 +19,117 @@ static int encode_callback(void* context, const unsigned char* bytes, size_t len
     return 0;
 }
 
-static int create_encoded_message_properties(IOTHUB_MESSAGE_HANDLE messageHandle, AMQP_VALUE *message_properties, size_t *message_properties_length)
+static int set_message_id_if_needed(IOTHUB_MESSAGE_HANDLE messageHandle, PROPERTIES_HANDLE uamqp_message_properties)
 {
-    PROPERTIES_HANDLE uamqp_message_properties = NULL;
+    int result;
     const char* messageId;
-    const char* correlationId;
-    int api_call_result;
 
-    uamqp_message_properties = properties_create();
     if (NULL != (messageId = IoTHubMessage_GetMessageId(messageHandle)))
     {
-        AMQP_VALUE uamqp_message_id = amqpvalue_create_string(messageId); // BUGBUG - check error return.
-        api_call_result = properties_set_message_id(uamqp_message_properties, uamqp_message_id);
-        amqpvalue_destroy(uamqp_message_id);
+        AMQP_VALUE uamqp_message_id;
+
+        if (NULL == (uamqp_message_id = amqpvalue_create_string(messageId)))
+        {
+            LogError("Failed amqpvalue_create_string for message_id");
+            result = __FAILURE__;
+        }
+        else if (0 != (result = properties_set_message_id(uamqp_message_properties, uamqp_message_id)))
+        {
+            LogError("Failed properties_set_message_id");
+            result = __FAILURE__;
+        }
+        else
+        {
+            result = 0;
+        }
+
+        if (NULL != uamqp_message_id)
+        {
+            amqpvalue_destroy(uamqp_message_id);
+        }
     }
+    else
+    {
+        result = 0;
+    }
+
+    return result;
+}
+
+static int set_message_correlation_id_if_needed(IOTHUB_MESSAGE_HANDLE messageHandle, PROPERTIES_HANDLE uamqp_message_properties)
+{
+    int result;
+    const char* correlationId;
 
     if (NULL != (correlationId = IoTHubMessage_GetCorrelationId(messageHandle)))
     {
-        AMQP_VALUE uamqp_correlation_id = amqpvalue_create_string(correlationId);
-        api_call_result = properties_set_correlation_id(uamqp_message_properties, uamqp_correlation_id);
-        amqpvalue_destroy(uamqp_correlation_id);
+        AMQP_VALUE uamqp_correlation_id;
+
+        if (NULL == (uamqp_correlation_id = amqpvalue_create_string(correlationId)))
+        {
+            LogError("Failed amqpvalue_create_string for message_id");
+            result = __FAILURE__;
+        }
+        else if (0 != (result = properties_set_correlation_id(uamqp_message_properties, uamqp_correlation_id)))
+        {
+            LogError("Failed properties_set_correlation_id");
+            result = __FAILURE__;
+        }
+        else
+        {
+            result = 0;
+        }
+
+        if (NULL != uamqp_correlation_id)
+        {
+            amqpvalue_destroy(uamqp_correlation_id);
+        }
+    }
+    else
+    {
+        result = 0;
     }
 
-    *message_properties = amqpvalue_create_properties(uamqp_message_properties);
+    return result;
+}
 
-    amqpvalue_get_encoded_size(*message_properties, message_properties_length);
-    return 0;
+
+static int create_encoded_message_properties(IOTHUB_MESSAGE_HANDLE messageHandle, AMQP_VALUE *message_properties, size_t *message_properties_length)
+{
+    PROPERTIES_HANDLE uamqp_message_properties = NULL;
+    int result;
+
+    if (NULL == (uamqp_message_properties = properties_create()))
+    {
+        LogError("Failed on properties_create()");
+        result = __FAILURE__;
+    }
+    else if (0 != set_message_id_if_needed(messageHandle, uamqp_message_properties))
+    {
+        LogError("Failed on set_message_id_if_needed()");
+        result = __FAILURE__;
+    }
+    else if (0 != set_message_correlation_id_if_needed(messageHandle, uamqp_message_properties))
+    {
+        LogError("Failed on set_message_correlation_id_if_needed()");
+        result = __FAILURE__;
+    }
+    else if (NULL == (*message_properties = amqpvalue_create_properties(uamqp_message_properties)))
+    {
+        LogError("Failed on amqpvalue_create_properties()");
+        result = __FAILURE__;
+    }
+    else if (0 != (amqpvalue_get_encoded_size(*message_properties, message_properties_length)))
+    {
+        LogError("Failed on amqpvalue_get_encoded_size()");
+        result = __FAILURE__;
+    }
+    else
+    {
+        result = 0;
+    }
+
+    return result;
 }
 
 static int create_encoded_application_properties(IOTHUB_MESSAGE_HANDLE messageHandle, AMQP_VALUE *application_properties, size_t *application_properties_length)
@@ -53,49 +138,78 @@ static int create_encoded_application_properties(IOTHUB_MESSAGE_HANDLE messageHa
     const char* const* property_keys;
     const char* const* property_values;
     size_t property_count = 0;
-
-    properties_map = IoTHubMessage_Properties(messageHandle);
     AMQP_VALUE uamqp_properties_map;
+    int result;
 
-    Map_GetInternals(properties_map, &property_keys, &property_values, &property_count);
-
-    size_t i;
-	// BUGBUG - is this correct behavior if there are 0 properties?
-    uamqp_properties_map = amqpvalue_create_map();
-
-    for (i = 0; i < property_count; i++)
+    if (NULL == (properties_map = IoTHubMessage_Properties(messageHandle)))
     {
-        AMQP_VALUE map_property_key;
-        AMQP_VALUE map_property_value;
-
-        /* Codes_SRS_EVENTHUBCLIENT_LL_01_056: [For each property a key and value AMQP value shall be created by calling amqpvalue_create_string.] */
-        if ((map_property_key = amqpvalue_create_string(property_keys[i])) == NULL)
+        // Codes_SRS_UAMQP_MESSAGING_09_028: [If IoTHubMessage_Properties fails, IoTHubMessage_CreateFromuAMQPMessage() shall fail and return immediately.]
+        LogError("Failed to get property map from IoTHub message.");
+        result = __FAILURE__;
+    }
+    else if (0 != (result = Map_GetInternals(properties_map, &property_keys, &property_values, &property_count)))
+    {
+        // Codes_SRS_UAMQP_MESSAGING_09_030: [If message_get_application_properties fails, IoTHubMessage_CreateFromuAMQPMessage() shall fail and return immediately.]
+        LogError("Failed reading the incoming uAMQP message properties (return code %d).", result);
+        result = __FAILURE__;
+    }
+    else if (property_count > 0)
+    {
+        size_t i;
+        if (NULL == (uamqp_properties_map = amqpvalue_create_map()))
         {
-            break;
+            LogError("amqpvalue_create_map failed");
+            result = __FAILURE__;
         }
-
-        if ((map_property_value = amqpvalue_create_string(property_values[i])) == NULL)
+        else
         {
-            amqpvalue_destroy(map_property_key);
-            break;
-        }
+            for (i = 0; i < property_count; i++)
+            {
+                AMQP_VALUE map_property_key;
+                AMQP_VALUE map_property_value;
 
-        /* Codes_SRS_EVENTHUBCLIENT_LL_01_057: [Then each property shall be added to the application properties map by calling amqpvalue_set_map_value.] */
-        if (amqpvalue_set_map_value(uamqp_properties_map, map_property_key, map_property_value) != 0)
-        {
-            amqpvalue_destroy(map_property_key);
-            amqpvalue_destroy(map_property_value);
-            break;
-        }
+                /* Codes_SRS_EVENTHUBCLIENT_LL_01_056: [For each property a key and value AMQP value shall be created by calling amqpvalue_create_string.] */
+                if ((map_property_key = amqpvalue_create_string(property_keys[i])) == NULL)
+                {
+                    result = __FAILURE__;
+                    break;
+                }
 
-        amqpvalue_destroy(map_property_key);
-        amqpvalue_destroy(map_property_value);
+                if ((map_property_value = amqpvalue_create_string(property_values[i])) == NULL)
+                {
+                    amqpvalue_destroy(map_property_key);
+                    result = __FAILURE__;
+                    break;
+                }
+
+                /* Codes_SRS_EVENTHUBCLIENT_LL_01_057: [Then each property shall be added to the application properties map by calling amqpvalue_set_map_value.] */
+                if (amqpvalue_set_map_value(uamqp_properties_map, map_property_key, map_property_value) != 0)
+                {
+                    amqpvalue_destroy(map_property_key);
+                    amqpvalue_destroy(map_property_value);
+                    result = __FAILURE__;
+                    break;
+                }
+
+                amqpvalue_destroy(map_property_key);
+                amqpvalue_destroy(map_property_value);
+            }
+
+            if (0 == result)
+            {
+                if (NULL == (*application_properties = amqpvalue_create_application_properties(uamqp_properties_map)))
+                {
+                    result = __FAILURE__;
+                }
+                else if (0 != amqpvalue_get_encoded_size(*application_properties, application_properties_length))
+                {
+                    result = __FAILURE__;
+                }
+            }
+        }
     }
 
-    *application_properties = amqpvalue_create_application_properties(uamqp_properties_map);
-    amqpvalue_get_encoded_size(*application_properties, application_properties_length);
-
-    return 0;
+    return result;
 }
 
 
@@ -134,9 +248,20 @@ static int create_encoded_data(IOTHUB_MESSAGE_HANDLE messageHandle, AMQP_VALUE *
         bin_data.bytes = (const unsigned char *)messageContent;
         bin_data.length = messageContentSize;
 
-        *data_value = amqpvalue_create_data(bin_data);
-        amqpvalue_get_encoded_size(*data_value, data_length);
-        result = 0;
+        if (NULL == (*data_value = amqpvalue_create_data(bin_data)))
+        {
+            LogError("amqpvalue_create_data failed");
+            result = __FAILURE__;
+        }
+        else if (0 != amqpvalue_get_encoded_size(*data_value, data_length))
+        {
+            LogError("amqpvalue_get_encoded_size failed");
+            result = __FAILURE__;
+        }
+        else
+        {
+            result = 0;
+        }
     }
 
     return result;
@@ -148,48 +273,48 @@ int create_amqp_message_data(IOTHUB_MESSAGE_HANDLE message_handle, BINARY_DATA* 
 
     AMQP_VALUE message_properties = NULL;
     AMQP_VALUE application_properties = NULL;
-    AMQP_VALUE data_value;
-    size_t message_properties_length;
-    size_t application_properties_length;
-    size_t data_length;
+    AMQP_VALUE data_value = NULL;
+    size_t message_properties_length = 0;
+    size_t application_properties_length = 0;
+    size_t data_length = 0;
 
     body_binary_data->bytes = NULL;
     body_binary_data->length = 0;
 
     if (RESULT_OK != (result = create_encoded_message_properties(message_handle, &message_properties, &message_properties_length)))
     {
-		LogError("create_amqp_message_data() failed");
+        LogError("create_amqp_message_data() failed");
     }
     else if (RESULT_OK != (result = create_encoded_application_properties(message_handle, &application_properties, &application_properties_length)))
     {
-		LogError("create_encoded_application_properties() failed");
+        LogError("create_encoded_application_properties() failed");
     }
     else if (RESULT_OK != (result = create_encoded_data(message_handle, &data_value, &data_length)))
     {
-		LogError("create_encoded_data() failed");
+        LogError("create_encoded_data() failed");
     }
     else if (NULL == (body_binary_data->bytes = malloc(message_properties_length + application_properties_length + data_length)))
     {
-		LogError("malloc of %d bytes failed", message_properties_length + application_properties_length + data_length);
-		result = __FAILURE__;
+        LogError("malloc of %d bytes failed", message_properties_length + application_properties_length + data_length);
+        result = __FAILURE__;
     }
     else if (0 != (result = amqpvalue_encode(message_properties, &encode_callback, body_binary_data)))
     {
-		LogError("amqpvalue_encode() for message properties failed, result = %d", result);
+        LogError("amqpvalue_encode() for message properties failed, result = %d", result);
     }
-    else if (0 != (result = amqpvalue_encode(application_properties, &encode_callback, body_binary_data)))
+    else if ((application_properties_length > 0) && (0 != (result = amqpvalue_encode(application_properties, &encode_callback, body_binary_data))))
     {
-		LogError("amqpvalue_encode() for application properties failed, result = %d", result);
+        LogError("amqpvalue_encode() for application properties failed, result = %d", result);
     }
     else if (0 != (result = amqpvalue_encode(data_value, &encode_callback, body_binary_data)))
     {
-		LogError("amqpvalue_encode() for data value failed, result = %d", result);
+        LogError("amqpvalue_encode() for data value failed, result = %d", result);
     }
-	else
-	{
-		body_binary_data->length = message_properties_length + application_properties_length + data_length;
-		result = RESULT_OK;
-	}
+    else
+    {
+        body_binary_data->length = message_properties_length + application_properties_length + data_length;
+        result = RESULT_OK;
+    }
 
     return result;
 }
